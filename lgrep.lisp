@@ -8,7 +8,8 @@
 	   #:grep
 	   #:grep-if
 	   #:grep-if-not 
-	   #:grep*))
+	   #:grep*
+	   #:find-files))
 
 (in-package #:lgrep)
 
@@ -215,4 +216,40 @@ INVERSEP ::= if true, returns all lines that do not match the pattern
 	     :eol eol))
   nil)
 
- 
+(defun find-files (pathspec &key pattern extension name case-insensitive-p)
+  "Look for files matching a given extension, name or pattern.
+PATHSPEC ::= root directory.
+PATTERN ::= if specified, matches against this regexp.
+EXTENSION ::= if specified, matches against this file extension.
+NAME ::= if specified, matche against this file name.
+CASE-INSENSITIVE-P ::= if specified, case insensitive.
+"
+  (flet ((stringcomp (s1 s2)
+	   (if case-insensitive-p
+	       (string-equal s1 s2)
+	       (string= s1 s2))))
+    (let ((matches nil)
+	  (regexp (when pattern 
+		    (cl-ppcre:create-scanner pattern
+					     :case-insensitive-mode case-insensitive-p))))
+      (labels ((grepfile (path)
+		 (when (and (or (null pattern) (cl-ppcre:all-matches-as-strings regexp (format nil "~A" path)))
+			    (or (null extension) (stringcomp (pathname-type path) extension))
+			    (or (null name) (stringcomp (pathname-name path) name)))
+		   (push path matches)))
+	       (%find-files (pathspec)
+		 (dolist (rpath (uiop:directory* pathspec))
+		   (cond
+		     ((uiop:directory-pathname-p rpath)
+		      ;; grep each file
+		      (dolist (fpath (uiop:directory-files rpath))
+			(grepfile fpath))
+		      ;; recurse into subdirs 
+		      (dolist (subdir (uiop:subdirectories rpath))
+			(%find-files subdir)))
+		     ((uiop:file-exists-p rpath)
+		      (grepfile rpath))
+		     (t (warn "Path ~S not a directory or file" rpath)
+			nil)))))
+	(%find-files pathspec))
+      matches)))
