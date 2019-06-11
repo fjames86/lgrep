@@ -65,12 +65,15 @@ BINARYP ::= don't decode as string, pass raw octets to func.
 	  (cond
 	    ((and (= (aref buf 0) 255) (= (aref buf 1) 254))	   
 	     ;; LE
-	     (setf encoding (encoding-le encoding)
+	     (setf encoding (if encoding (encoding-le encoding) :utf-16le)
 		   eol-bytes (get-eol-bytes)))
 	    ((and (= (aref buf 0) 254) (= (aref buf 1) 255))
 	     ;; BE
-	     (setf encoding (encoding-be encoding)
-		   eol-bytes (get-eol-bytes))))
+	     (setf encoding (if encoding (encoding-be encoding) :utf-16be)
+		   eol-bytes (get-eol-bytes)))
+	    (t
+	     ;; Neither, guess utf-8 
+	     (setf encoding (or encoding :utf-8))))
 	  (setf firstloop nil
 		eol-bytes (get-eol-bytes)))
 	
@@ -117,7 +120,8 @@ EOL ::= end of line delimiter
   (flet ((grepfile (path)
 	   (handler-bind ((error (lambda (c)
 				   (warn "Error decoding ~A: ~A" path c)
-				   (invoke-restart 'ignore-file))))
+				   (when (find-restart 'ignore-file)
+				     (invoke-restart 'ignore-file)))))
 	     (mapfile (lambda (line lineidx)
 			(when (funcall predicate line)
 			  (funcall func path line lineidx)))
@@ -125,7 +129,7 @@ EOL ::= end of line delimiter
 		      :encoding encoding
 		      :eol eol))))
     (cond
-      (recursivep
+      ((or recursivep (uiop:directory-pathname-p (uiop:truename* pathspec)))
        (dolist (rpath (uiop:directory* pathspec))
 	 (cond
 	   ((uiop:directory-pathname-p rpath)
@@ -142,7 +146,7 @@ EOL ::= end of line delimiter
 	    (grepfile rpath))
 	   (t (warn "Path ~S not a directory or file" rpath)
 	      nil))))
-      (t
+      ((uiop:file-exists-p pathspec)
        (grepfile pathspec)))))
   	 
 (defun grep-if (predicate pathspec &key recursivep encoding eol)
@@ -253,3 +257,9 @@ CASE-INSENSITIVE-P ::= if specified, case insensitive.
 			nil)))))
 	(%find-files pathspec))
       matches)))
+
+(defun find-files-containing (pattern pathspec &key case-insensitive-p)
+  (mapcar #'car
+	  (grep pattern pathspec
+		:case-insensitive-p case-insensitive-p
+		:recursivep t)))
