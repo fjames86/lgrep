@@ -43,43 +43,35 @@ BINARYP ::= don't decode as string, pass raw octets to func.
 	 (start 0)
 	 (end 0)
 	 (eof nil)
-	 (eol-bytes (if (typep eol '(vector (unsigned-byte 8)))
-			eol
-			(babel:string-to-octets (or eol *default-eol*)
-						:encoding (or encoding :utf-8)
-						:use-bom nil)))
+	 (eol-bytes nil)
 	 (done nil))
 	(done)
 
       (flet ((refill-buffer ()
 	       (let ((n (read-sequence buf stream :start start)))
 		 (when (< n (length buf)) (setf eof t))
-		 (setf end n))))
+		 (setf end n)))
+	     (get-eol-bytes ()
+	       (if (typep eol '(vector (unsigned-byte 8)))
+		   eol
+		   (babel:string-to-octets (or eol *default-eol*)
+					   :encoding encoding
+					   :use-bom nil))))
 
-	;; check for BOM on first loop 
+	;; check for BOM on first loop, use to modify encoding 
 	(when firstloop
 	  (refill-buffer)
 	  (cond
 	    ((and (= (aref buf 0) 255) (= (aref buf 1) 254))	   
 	     ;; LE
-	     (setf encoding
-		   (encoding-le encoding)
-		   eol-bytes 
-		   (if (typep eol '(vector (unsigned-byte 8)))
-		       eol
-		       (babel:string-to-octets (or eol *default-eol*)
-					       :encoding encoding
-					       :use-bom nil))))
+	     (setf encoding (encoding-le encoding)
+		   eol-bytes (get-eol-bytes)))
 	    ((and (= (aref buf 0) 254) (= (aref buf 1) 255))
 	     ;; BE
 	     (setf encoding (encoding-be encoding)
-		   eol-bytes 
-		   (if (typep eol '(vector (unsigned-byte 8)))
-		       eol
-		       (babel:string-to-octets (or eol *default-eol*)
-					       :encoding encoding
-					       :use-bom nil)))))
-	  (setf firstloop nil))
+		   eol-bytes (get-eol-bytes))))
+	  (setf firstloop nil
+		eol-bytes (get-eol-bytes)))
 	
 	(let ((pos (search eol-bytes buf :start2 start :end2 end)))
 	  (cond
@@ -88,7 +80,15 @@ BINARYP ::= don't decode as string, pass raw octets to func.
 	     (if binaryp
 		 (funcall func (subseq buf start pos) lineidx)
 		 (let ((str (restart-case (babel:octets-to-string buf :start start :end pos :encoding (or encoding :utf-8))
-			      (ignore-file () (return-from mapfile nil)))))
+			      (ignore-file () (return-from mapfile nil))
+			      (use-value (value)
+				:report (lambda (stream) (format stream "Enter a value"))
+				:interactive
+				(lambda ()
+				  (format *query-io* "Enter a value: ")
+				  (finish-output *query-io*)
+				  (list (read-line *query-io*)))
+				value))))
 		   (funcall func str lineidx)))
 	     ;; update offsets 
 	     (setf start (+ pos (length eol-bytes))
