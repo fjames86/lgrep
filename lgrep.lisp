@@ -36,7 +36,7 @@ FILESPEC ::= file specification.
 EOL ::= end of line delimiter. defaults to #\return #\linefeed on windows, #\linefeed otherwise.
 ENCODING ::= character encoding. defaults to utf-8.
 BINARYP ::= don't decode as string, pass raw octets to func.
-" 
+"
   (with-open-file (stream filespec :direction :input :element-type '(unsigned-byte 8))
     (do ((buf (make-array 4096 :element-type '(unsigned-byte 8)))
 	 (firstloop t)
@@ -45,19 +45,26 @@ BINARYP ::= don't decode as string, pass raw octets to func.
 	 (end 0)
 	 (eof nil)
 	 (eol-bytes nil)
+	 (file-offset 0)
 	 (done nil))
 	(done)
 
       (flet ((refill-buffer ()
-	       (let ((n (read-sequence buf stream :start start)))
+	       (let ((n (read-sequence buf stream :start end)))
 		 (when (< n (length buf)) (setf eof t))
 		 (setf end n)))
 	     (get-eol-bytes ()
-	       (if (typep eol '(vector (unsigned-byte 8)))
-		   eol
-		   (babel:string-to-octets (or eol *default-eol*)
-					   :encoding encoding
-					   :use-bom nil))))
+	       (cond
+		 ((typep eol '(vector (unsigned-byte 8)))
+		  eol)
+		 (t
+		  (let ((default-eol 
+			 (babel:string-to-octets (or eol *default-eol*)
+						 :encoding encoding
+						 :use-bom nil)))
+		    (if (search default-eol buf)
+			default-eol
+			(babel:string-to-octets (format nil "~C" #\linefeed) :encoding :utf-8)))))))
 
 	;; check for BOM on first loop, use to modify encoding 
 	(when firstloop
@@ -65,14 +72,21 @@ BINARYP ::= don't decode as string, pass raw octets to func.
 	  (cond
 	    ((and (= (aref buf 0) 255) (= (aref buf 1) 254))	   
 	     ;; LE
-	     (setf encoding (if encoding (encoding-le encoding) :utf-16le)
-		   eol-bytes (get-eol-bytes)))
+	     (setf encoding (if encoding (encoding-le encoding) :utf-16le)))
 	    ((and (= (aref buf 0) 254) (= (aref buf 1) 255))
 	     ;; BE
-	     (setf encoding (if encoding (encoding-be encoding) :utf-16be)
-		   eol-bytes (get-eol-bytes)))
+	     (setf encoding (if encoding (encoding-be encoding) :utf-16be)))
+	    ((and (= (aref buf 0) 0) (= (aref buf 2) 0))
+	     ;; guess LE
+	     (setf encoding (if encoding (encoding-le encoding) :utf-16le)))
+	    ((and (= (aref buf 1) 0) (= (aref buf 3) 0))
+	     ;; guess BE
+	     (setf encoding (if encoding (encoding-be encoding) :utf-16be)))
+	    ((and (= (aref buf 0) #xef) (= (aref buf 1) #xbb) (= (aref buf 2) #xbf))
+	     ;; UTF8
+	     (setf encoding :utf-8))
 	    (t
-	     ;; Neither, guess utf-8 
+	     ;; Neither, guess utf-8
 	     (setf encoding (or encoding :utf-8))))
 	  (setf firstloop nil
 		eol-bytes (get-eol-bytes)))
@@ -84,7 +98,7 @@ BINARYP ::= don't decode as string, pass raw octets to func.
 	     (if binaryp
 		 (funcall func (subseq buf start pos) lineidx)
 		 (let ((str (restart-case (babel:octets-to-string buf :start start :end pos :encoding (or encoding :utf-8))
-			      (ignore-file () (return-from mapfile nil))
+			      #+nil(ignore-file () (return-from mapfile nil))
 			      (use-value (value)
 				:report (lambda (stream) (format stream "Enter a value"))
 				:interactive
@@ -95,16 +109,19 @@ BINARYP ::= don't decode as string, pass raw octets to func.
 				value))))
 		   (funcall func str lineidx)))
 	     ;; update offsets 
-	     (setf start (+ pos (length eol-bytes))
+	     (setf file-offset (+ file-offset (- pos start) (length eol-bytes))
+		   start (+ pos (length eol-bytes))
 		   lineidx (1+ lineidx)))
 	    (eof
 	     ;; end of line not found and we have also hit the end of the file: we are done
 	     (setf done t))
 	    (t 
 	     ;; eol not found but not end of file. memmove and refill buffer
+	     (when (= start 0) (error "Line larger than buffer"))
+	     
 	     (dotimes (i (- end start))
 	       (setf (aref buf i) (aref buf (+ start i))))
-	     (setf end start
+	     (setf end (- end start)
 		   start 0)
 	     (refill-buffer))))))))
 
@@ -118,16 +135,18 @@ ENCODING ::= character encoding
 EOL ::= end of line delimiter 
 " 
   (flet ((grepfile (path)
-	   (handler-bind ((error (lambda (c)
+	   (handler-bind ((error (lambda (c)				   
 				   (warn "Error decoding ~A: ~A" path c)
-				   (when (find-restart 'ignore-file)
-				     (invoke-restart 'ignore-file)))))
-	     (mapfile (lambda (line lineidx)
-			(when (funcall predicate line)
-			  (funcall func path line lineidx)))
-		      path 
-		      :encoding encoding
-		      :eol eol))))
+				   (break)
+				   (invoke-restart 'ignore-file))))
+	     (restart-case 
+		 (mapfile (lambda (line lineidx)
+			    (when (funcall predicate line)
+			      (funcall func path line lineidx)))
+			  path 
+			  :encoding encoding
+			  :eol eol)
+	       (ignore-file () (return-from grepfile nil))))))
     (cond
       ((or recursivep (uiop:directory-pathname-p (uiop:truename* pathspec)))
        (dolist (rpath (uiop:directory* pathspec))
