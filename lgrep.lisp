@@ -98,7 +98,7 @@ BINARYP ::= don't decode as string, pass raw octets to func.
 	     (if binaryp
 		 (funcall func (subseq buf start pos) lineidx)
 		 (let ((str (restart-case (babel:octets-to-string buf :start start :end pos :encoding (or encoding :utf-8))
-			      #+nil(ignore-file () (return-from mapfile nil))
+			      (use-iso-8859 () (babel:octets-to-string buf :start start :end pos :encoding :iso-8859-1))
 			      (use-value (value)
 				:report (lambda (stream) (format stream "Enter a value"))
 				:interactive
@@ -137,7 +137,6 @@ EOL ::= end of line delimiter
   (flet ((grepfile (path)
 	   (handler-bind ((error (lambda (c)				   
 				   (warn "Error decoding ~A: ~A" path c)
-				   (break)
 				   (invoke-restart 'ignore-file))))
 	     (restart-case 
 		 (mapfile (lambda (line lineidx)
