@@ -9,7 +9,8 @@
 	   #:grep-if
 	   #:grep-if-not 
 	   #:grep*
-	   #:find-files))
+	   #:find-files
+	   #:find-files-containing))
 
 (in-package #:lgrep)
 
@@ -28,6 +29,49 @@
     (:utf-16 :utf-16be)
     (otherwise encoding)))
 
+(defun guess-encoding (buf encoding)
+  (cond
+    ((and (= (aref buf 0) 255) (= (aref buf 1) 254))	   
+     ;; LE
+     (setf encoding (if encoding (encoding-le encoding) :utf-16le)))
+    ((and (= (aref buf 0) 254) (= (aref buf 1) 255))
+     ;; BE
+     (setf encoding (if encoding (encoding-be encoding) :utf-16be)))
+    ((and (= (aref buf 0) 0) (= (aref buf 2) 0))
+     ;; guess LE
+     (setf encoding (if encoding (encoding-le encoding) :utf-16le)))
+    ((and (= (aref buf 1) 0) (= (aref buf 3) 0))
+     ;; guess BE
+     (setf encoding (if encoding (encoding-be encoding) :utf-16be)))
+    ((and (= (aref buf 0) #xef) (= (aref buf 1) #xbb) (= (aref buf 2) #xbf))
+     ;; UTF8
+     (setf encoding :utf-8))
+    (t
+     ;; Neither, guess utf-8
+     (setf encoding (or encoding :utf-8))))
+  encoding)
+
+;; ------------------- circular buffer for storing line context ---------------
+
+;; line buffer, for saving line context i.e. lines before/after current
+(defstruct linebuffer
+  lines
+  max)
+(defun linebuffer-insert (lb line)
+  (let ((c (length (linebuffer-lines lb))))
+    (if (= c (linebuffer-max lb))
+	(setf (linebuffer-lines lb) (cons line (butlast (linebuffer-lines lb))))
+	(setf (linebuffer-lines lb) (cons line (linebuffer-lines lb)))))
+  line)
+(defun linebuffer-before (lb n)
+  (butlast (linebuffer-lines lb) (- (length (linebuffer-lines lb)) n)))
+(defun linebuffer-after (lb n)
+  (nthcdr (1+ n) (linebuffer-lines lb)))
+
+;; ----------------------------------------------------------------------------------
+
+
+
 
 (defun mapfile (func filespec &key encoding eol binaryp)
   "Map over each line of a given file. No return value.
@@ -38,7 +82,7 @@ ENCODING ::= character encoding. defaults to utf-8.
 BINARYP ::= don't decode as string, pass raw octets to func.
 "
   (with-open-file (stream filespec :direction :input :element-type '(unsigned-byte 8))
-    (do ((buf (make-array 4096 :element-type '(unsigned-byte 8)))
+    (do ((buf (make-array (* 32 1024) :element-type '(unsigned-byte 8)))
 	 (firstloop t)
 	 (lineidx 0)
 	 (start 0)
@@ -66,29 +110,11 @@ BINARYP ::= don't decode as string, pass raw octets to func.
 			default-eol
 			(babel:string-to-octets (format nil "~C" #\linefeed) :encoding :utf-8)))))))
 
-	;; check for BOM on first loop, use to modify encoding 
+	;; on first loop, check for BOM to detect encoding and derive eol bytes 
 	(when firstloop
 	  (refill-buffer)
-	  (cond
-	    ((and (= (aref buf 0) 255) (= (aref buf 1) 254))	   
-	     ;; LE
-	     (setf encoding (if encoding (encoding-le encoding) :utf-16le)))
-	    ((and (= (aref buf 0) 254) (= (aref buf 1) 255))
-	     ;; BE
-	     (setf encoding (if encoding (encoding-be encoding) :utf-16be)))
-	    ((and (= (aref buf 0) 0) (= (aref buf 2) 0))
-	     ;; guess LE
-	     (setf encoding (if encoding (encoding-le encoding) :utf-16le)))
-	    ((and (= (aref buf 1) 0) (= (aref buf 3) 0))
-	     ;; guess BE
-	     (setf encoding (if encoding (encoding-be encoding) :utf-16be)))
-	    ((and (= (aref buf 0) #xef) (= (aref buf 1) #xbb) (= (aref buf 2) #xbf))
-	     ;; UTF8
-	     (setf encoding :utf-8))
-	    (t
-	     ;; Neither, guess utf-8
-	     (setf encoding (or encoding :utf-8))))
-	  (setf firstloop nil
+	  (setf encoding (guess-encoding buf encoding)
+		firstloop nil
 		eol-bytes (get-eol-bytes)))
 	
 	(let ((pos (search eol-bytes buf :start2 start :end2 end)))
@@ -125,7 +151,7 @@ BINARYP ::= don't decode as string, pass raw octets to func.
 		   start 0)
 	     (refill-buffer))))))))
 
-(defun mapgrep (func predicate pathspec &key recursivep encoding eol)
+(defun mapgrep (func predicate pathspec &key recursivep encoding eol exclude-files)
   "Map over each grepped line. 
 FUNC ::= function that accepts arguments: path line lineidx 
 PREDICATE ::= predicate function that takes the line 
@@ -135,17 +161,20 @@ ENCODING ::= character encoding
 EOL ::= end of line delimiter 
 " 
   (flet ((grepfile (path)
-	   (handler-bind ((error (lambda (c)				   
-				   (warn "Error decoding ~A: ~A" path c)
-				   (invoke-restart 'ignore-file))))
-	     (restart-case 
-		 (mapfile (lambda (line lineidx)
-			    (when (funcall predicate line)
-			      (funcall func path line lineidx)))
-			  path 
-			  :encoding encoding
-			  :eol eol)
-	       (ignore-file () (return-from grepfile nil))))))
+	   (unless (some (lambda (exclude-file)
+			   (string-equal (pathname-type path) exclude-file))
+			 exclude-files)
+	     (handler-bind ((error (lambda (c)				   
+				     (warn "Error decoding ~A: ~A" path c)
+				     (invoke-restart 'ignore-file))))
+	       (restart-case 
+		   (mapfile (lambda (line lineidx)
+			      (when (funcall predicate line)
+				(funcall func path line lineidx)))
+			    path 
+			    :encoding encoding
+			    :eol eol)
+		 (ignore-file () (return-from grepfile nil)))))))
     (cond
       ((or recursivep (uiop:directory-pathname-p (uiop:truename* pathspec)))
        (dolist (rpath (uiop:directory* pathspec))
@@ -159,7 +188,8 @@ EOL ::= end of line delimiter
 	      (mapgrep func predicate subdir
 		       :recursivep recursivep
 		       :encoding encoding
-		       :eol eol)))
+		       :eol eol
+		       :exclude-files exclude-files)))
 	   ((uiop:file-exists-p rpath)
 	    (grepfile rpath))
 	   (t (warn "Path ~S not a directory or file" rpath)
@@ -167,7 +197,7 @@ EOL ::= end of line delimiter
       ((uiop:file-exists-p pathspec)
        (grepfile pathspec)))))
   	 
-(defun grep-if (predicate pathspec &key recursivep encoding eol)
+(defun grep-if (predicate pathspec &key recursivep encoding eol exclude-files)
   "Search a file by lines. 
 PREDICATE ::= function taking a single parameter, line.
 RECURSIVEP ::= if true, recurses into subdirectories
@@ -184,7 +214,8 @@ EOL ::= end of line delimiter
 	     pathspec
 	     :recursivep recursivep
 	     :encoding encoding
-	     :eol eol)
+	     :eol eol
+	     :exclude-files exclude-files)
     lines))
 
 (defun grep-if-not (predicate pathspec &key recursivep encoding eol)
@@ -193,7 +224,7 @@ EOL ::= end of line delimiter
 	   :encoding encoding
 	   :eol eol))
 
-(defun grep (pattern pathspec &key case-insensitive-p recursivep encoding eol inversep)
+(defun grep (pattern pathspec &key case-insensitive-p recursivep encoding eol inversep exclude-files)
   "Walk each file searching for lines matching PATTERN. Returns a list of all the matched files and lines.
 PATTERN ::= cl-ppcre regexp 
 PATHSPEC ::= file/directory path specifier 
@@ -212,9 +243,10 @@ INVERSEP ::= if true, returns all lines that do not match the pattern
 	     pathspec
 	     :recursivep recursivep
 	     :encoding encoding
-	     :eol eol)))
+	     :eol eol
+	     :exclude-files exclude-files)))
   
-(defun grep* (pattern pathspec &key case-insensitive-p recursivep encoding eol inversep)
+(defun grep* (pattern pathspec &key case-insensitive-p recursivep encoding eol inversep exclude-files)
   "Walk each file searching for lines matching PATTERN, printing match to stdout.
 PATTERN ::= cl-ppcre regexp 
 PATHSPEC ::= file/directory path specifier 
@@ -225,17 +257,19 @@ EOL ::= end of line delimiter
 INVERSEP ::= if true, returns all lines that do not match the pattern
 "
   (let ((regexp (cl-ppcre:create-scanner pattern :case-insensitive-mode case-insensitive-p)))
-    (mapgrep (lambda (path line lineidx)
-	       (format t "~A:~A ~A~%" path lineidx line))
-	     (lambda (line)
-	       (let ((matchp (cl-ppcre:all-matches-as-strings regexp line)))
-		 (if inversep
-		     (not matchp)
-		     matchp)))
-	     pathspec
-	     :recursivep recursivep
-	     :encoding encoding
-	     :eol eol))
+    (handler-bind ((warning (lambda (c) (muffle-warning c))))
+      (mapgrep (lambda (path line lineidx)
+		 (format t "~A:~A ~A~%" path lineidx line))
+	       (lambda (line)
+		 (let ((matchp (cl-ppcre:all-matches-as-strings regexp line)))
+		   (if inversep
+		       (not matchp)
+		       matchp)))
+	       pathspec
+	       :recursivep recursivep
+	       :encoding encoding
+	       :eol eol
+	       :exclude-files exclude-files)))
   nil)
 
 (defun find-files (pathspec &key pattern extension name case-insensitive-p)
@@ -281,3 +315,4 @@ CASE-INSENSITIVE-P ::= if specified, case insensitive.
 	  (grep pattern pathspec
 		:case-insensitive-p case-insensitive-p
 		:recursivep t)))
+
