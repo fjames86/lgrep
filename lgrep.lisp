@@ -5,14 +5,22 @@
   (:use #:cl)
   (:export #:mapfile
 	   #:mapgrep
-	   #:grep
 	   #:grep-if
-	   #:grep-if-not 
+	   #:grep
 	   #:grep*
-	   #:find-files
-	   #:find-files-containing))
+	   #:find-files))
 
 (in-package #:lgrep)
+
+
+;;;
+;;; This file defines utilities for walking though files line by line.
+;;; mapfile: walks a file line by line 
+;;; mapgrep: walks a set of files, searching for lines which match a given predicate
+;;; grep: walks a set of files, searching for lines which match a given pattern 
+;;; 
+
+
 
 (defparameter *default-eol*
   #+(or win32 windows) (format nil "~C~C" #\return #\linefeed)
@@ -50,28 +58,6 @@
      ;; Neither, guess utf-8
      (setf encoding (or encoding :utf-8))))
   encoding)
-
-;; ------------------- circular buffer for storing line context ---------------
-
-;; line buffer, for saving line context i.e. lines before/after current
-(defstruct linebuffer
-  lines
-  max)
-(defun linebuffer-insert (lb line)
-  (let ((c (length (linebuffer-lines lb))))
-    (if (= c (linebuffer-max lb))
-	(setf (linebuffer-lines lb) (cons line (butlast (linebuffer-lines lb))))
-	(setf (linebuffer-lines lb) (cons line (linebuffer-lines lb)))))
-  line)
-(defun linebuffer-before (lb n)
-  (butlast (linebuffer-lines lb) (- (length (linebuffer-lines lb)) n)))
-(defun linebuffer-after (lb n)
-  (nthcdr (1+ n) (linebuffer-lines lb)))
-
-;; ----------------------------------------------------------------------------------
-
-
-
 
 (defun mapfile (func filespec &key encoding eol binaryp)
   "Map over each line of a given file. No return value.
@@ -218,12 +204,6 @@ EOL ::= end of line delimiter
 	     :exclude-files exclude-files)
     lines))
 
-(defun grep-if-not (predicate pathspec &key recursivep encoding eol)
-  (grep-if (complement predicate) pathspec
-	   :recursivep recursivep
-	   :encoding encoding
-	   :eol eol))
-
 (defun grep (pattern pathspec &key case-insensitive-p recursivep encoding eol inversep exclude-files)
   "Walk each file searching for lines matching PATTERN. Returns a list of all the matched files and lines.
 PATTERN ::= cl-ppcre regexp 
@@ -309,10 +289,4 @@ CASE-INSENSITIVE-P ::= if specified, case insensitive.
 			nil)))))
 	(%find-files pathspec))
       matches)))
-
-(defun find-files-containing (pattern pathspec &key case-insensitive-p)
-  (mapcar #'car
-	  (grep pattern pathspec
-		:case-insensitive-p case-insensitive-p
-		:recursivep t)))
 
