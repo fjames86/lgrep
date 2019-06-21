@@ -447,7 +447,6 @@ EDIT ::= (INSERT old-index new-index), (DELETE old-index new-index)
 	(declare (ignore cmd))
 	(flet ((complete-hunk ()
 		 ;; add after context lines
-		 (break)
 		 (dotimes (i context)
 		   (when (and (< old-idx max-lines1)
 			      (< new-idx max-lines2))
