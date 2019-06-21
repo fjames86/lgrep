@@ -25,15 +25,22 @@ recursively into subdirectories, if the `RECURSIVEP` option is set.
 
 If any lines cannot be decoded to a string, a warning is signalled and the file is ignored.
 
-## 2.3 `grep-if`, `grep-if-not`
-These functions search through a set of files, invoking a callback on each line of each file.
+## 2.3 `grep-if`
+This function searches through a set of files, invoking a callback on each line of each file.
 
 ## 2.4 `grep`, `grep*`
 These functions are conveience wrappers. `grep` returns a list of all matches, `grep*` prints
 out matching lines to `*STANDARD-OUTPUT*` in a similar way to unix grep.
 
+## 2.5 `diff`
+This function compares two files and prints differences to `*STANDARD-OUTPUT*` in the unified diff
+format. 
+
 ## 3. License
 Licensed under the terms of the MIT license.
+
+## 4. Notes
+The diffing algorithm was translated from the original Python program at (blog.robertelder.org/diff-algorithm). 
 
 Frank James
 2019

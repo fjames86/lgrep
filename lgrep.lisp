@@ -8,13 +8,15 @@
 	   #:grep-if
 	   #:grep
 	   #:grep*
-	   #:find-files))
+	   #:find-files
+	   #:diff
+	   #:print-lines))
 
 (in-package #:lgrep)
 
 
 ;;;
-;;; This file defines utilities for walking though files line by line.
+;;; This file defines various utilities for walking though files line by line.
 ;;; mapfile: walks a file line by line 
 ;;; mapgrep: walks a set of files, searching for lines which match a given predicate
 ;;; grep: walks a set of files, searching for lines which match a given pattern 
@@ -94,8 +96,22 @@ BINARYP ::= don't decode as string, pass raw octets to func.
 						 :use-bom nil)))
 		    (if (search default-eol buf)
 			default-eol
-			(babel:string-to-octets (format nil "~C" #\linefeed) :encoding :utf-8)))))))
-
+			(babel:string-to-octets (format nil "~C" #\linefeed) :encoding :utf-8))))))
+	     (invoke-callback (pos)
+	       (if binaryp
+		   (funcall func (subseq buf start pos) lineidx)
+		   (let ((str (restart-case (babel:octets-to-string buf :start start :end pos :encoding (or encoding :utf-8))
+				(use-iso-8859 () (babel:octets-to-string buf :start start :end pos :encoding :iso-8859-1))
+				(use-value (value)
+				  :report (lambda (stream) (format stream "Enter a value"))
+				  :interactive
+				  (lambda ()
+				    (format *query-io* "Enter a value: ")
+				    (finish-output *query-io*)
+				    (list (read-line *query-io*)))
+				  value))))
+		     (funcall func str lineidx)))))
+	
 	;; on first loop, check for BOM to detect encoding and derive eol bytes 
 	(when firstloop
 	  (refill-buffer)
@@ -107,25 +123,14 @@ BINARYP ::= don't decode as string, pass raw octets to func.
 	  (cond
 	    (pos
 	     ;; invoke callback 
-	     (if binaryp
-		 (funcall func (subseq buf start pos) lineidx)
-		 (let ((str (restart-case (babel:octets-to-string buf :start start :end pos :encoding (or encoding :utf-8))
-			      (use-iso-8859 () (babel:octets-to-string buf :start start :end pos :encoding :iso-8859-1))
-			      (use-value (value)
-				:report (lambda (stream) (format stream "Enter a value"))
-				:interactive
-				(lambda ()
-				  (format *query-io* "Enter a value: ")
-				  (finish-output *query-io*)
-				  (list (read-line *query-io*)))
-				value))))
-		   (funcall func str lineidx)))
+	     (invoke-callback pos)
 	     ;; update offsets 
 	     (setf file-offset (+ file-offset (- pos start) (length eol-bytes))
 		   start (+ pos (length eol-bytes))
 		   lineidx (1+ lineidx)))
 	    (eof
 	     ;; end of line not found and we have also hit the end of the file: we are done
+	     (invoke-callback end)
 	     (setf done t))
 	    (t 
 	     ;; eol not found but not end of file. memmove and refill buffer
@@ -289,4 +294,246 @@ CASE-INSENSITIVE-P ::= if specified, case insensitive.
 			nil)))))
 	(%find-files pathspec))
       matches)))
+
+(defun print-lines (filespec &key (start 0) end)
+  "Print lines from a given file in range.
+FILESPEC ::= input file.
+START, END ::= region of file.
+" 
+  (mapfile (lambda (line lineidx)
+	     (when (and (>= lineidx start)
+			(or (null end) (< lineidx end)))
+	       (format t "~6<~4,'0D~>|~A|~%" lineidx line)))
+	   filespec))
+
+;; ----------------------------------------------------------
+
+;; The diffing algorithm is a Linear Space Myers Diff.
+;; The codes below were translated from the Python program at blog.robertelder.org/diff-algorithm
+;; I don't understand how it works but it does seem to be correct.
+
+(defun subseq% (seq start &optional end)
+  "Python semantics with modular indexing" 
+  (cond
+    ((and (integerp end) (= end 0))
+     (vector))
+    ((and (integerp end) (= start end))
+     (vector))
+    (t 
+     (let ((len (length seq))
+	   (end% (or end (length seq))))  
+       (subseq seq (mod (+ start len) len)
+	       (if (= end% len)
+		   end%
+		   (mod (+ end% len) len)))))))
+
+(defun mod% (a b)
+  "Pythons MOD always returns positive numbers." 
+  (mod (+ a b) b))
+
+(defun diff% (lines1 lines2 i j)
+  "Good luck understanding how this works. I don't.
+LINES1 ::= array of old files lines.
+LINES2 ::= array of new file lines.
+I ::= index into old file
+J ::= index into new file.
+Returns an edit script ::= edit*
+EDIT ::= (INSERT old-index new-index), (DELETE old-index new-index)
+"
+  (let* ((n (length lines1))
+	 (m (length lines2))
+	 (l (+ n m))
+	 (z  (+ (* 2 (min n m)) 2)))
+    (cond
+      ((and (> n 0) (> m 0))
+       (let ((w (- n m))
+	     (g (make-array z :initial-element 0))
+	     (p (make-array z :initial-element 0)))
+	 (dotimes (h (+ 1 (truncate l 2) (mod% l 2)))
+	   (dotimes (r 2)
+	     (let ((c (if (zerop r) g p))
+		   (d (if (zerop r) p g))
+		   (o (if (zerop r) 1 0))
+		   (mm (if (zerop r) 1 -1)))
+	       (do ((k (- (- h (* 2 (max 0 (- h m))))) (+ k 2)))
+		   ((>= k (+ 1 h (* -2 (max 0 (- h n))))))
+		 (let* ((a (if (or (= k (- h))
+				   (and (not (= k h))
+					(< (aref c (mod% (1- k) z)) (aref c (mod% (1+ k) z)))))
+			       (aref c (mod% (1+ k) z))
+			       (1+ (aref c (mod% (1- k) z)))))
+			(b (- a k))
+			(s a)
+			(tt b))
+		   (do ()
+		       ((not (and (< a n)
+				  (< b m)
+				  (equal (aref lines1 (+ (* (- 1 o) n) (* mm a) (- o 1)))
+					 (aref lines2 (+ (* (- 1 o) m) (* mm b) (- o 1)))))))
+		     (incf a)
+		     (incf b))
+		   (setf (aref c (mod% k z)) a)
+		   (let ((zz (- (- k w))))
+		     (when (and (= (mod% l 2) o)
+				(>= zz (- (- h o)))
+				(<= zz (- h o))
+				(>= (+ (aref c (mod% k z)) (aref d (mod% zz z))) n))
+		       (let ((dd (if (= o 1) (1- (* 2 h)) (* 2 h)))
+			     (x (if (= o 1) s (- n a)))
+			     (y (if (= o 1) tt (- m b)))
+			     (u (if (= o 1) a (- n s)))
+			     (v (if (= o 1) b (- m tt))))
+			 (cond
+			   ((or (> dd 1) (and (not (= x u)) (not (= y v))))
+			    (return-from diff%
+			      (concatenate 'vector
+					   (diff% (subseq% lines1 0 x)
+						  (subseq% lines2 0 y)
+						  i 
+						  j)
+					   (diff% (subseq% lines1 u n)
+						  (subseq% lines2 v m)
+						  (+ i u)
+						  (+ j v)))))
+			   ((> m n)
+			    (return-from diff%
+			      (diff% (vector)
+				     (subseq% lines2 n m)
+				     (+ i n)
+				     (+ j n))))
+			   ((< m n)
+			    (return-from diff%
+			      (diff% (subseq% lines1 m n)
+				     (vector)
+				     (+ i m)
+				     (+ j m))))
+			   (t
+			    (return-from diff% (vector))))))))))))))
+      ((> n 0)
+       (apply #'vector (loop :for x :below n :collect (list 'delete (+ i x) j))))
+      (t
+       (apply #'vector (loop :for x :below m :collect (list 'insert i (+ j x))))))))
+
+(defun get-file-lines (filespec &key encoding)
+  (let ((lines nil))
+    (mapfile (lambda (line lineidx)
+	       (declare (ignore lineidx))
+	       (push (list (sxhash line) line) lines))
+	     filespec
+	     :encoding encoding)
+    (apply #'vector (nreverse lines))))
+
+
+(defun timestamp-string (&optional when)
+  (multiple-value-bind (s m h day month y) (decode-universal-time (or when (get-universal-time)))
+    (format nil "~A-~A-~A ~A:~A:~A" y month day h m s)))
+
+;; need to be able to merge edits into hunks, which are groups of changes.
+;; hunks are bounded by a configurable number of context lines, which are unchanged lines on either
+;; side of the edit sequence.
+;; Computing the hunks with context=0 means getting all sequences of changes that are
+;; adjacent in the original file. Computing hunks with context>0 allows there to be unchanged
+;; lines between changes.
+
+(defun get-hunks (script context max-lines1 max-lines2)
+  (do ((edits script)
+       (hunk nil)
+       (old-idx 0)
+       (new-idx 0)
+       (hunks nil))
+      ((null edits) (nreverse hunks))
+    (let ((edit (car edits)))
+      (destructuring-bind (cmd oidx nidx) edit
+	(declare (ignore cmd))
+	(flet ((complete-hunk ()
+		 ;; add after context lines
+		 (break)
+		 (dotimes (i context)
+		   (when (and (< old-idx max-lines1)
+			      (< new-idx max-lines2))
+		     (push (list 'null old-idx new-idx) (cdr hunk))
+		     (incf old-idx)
+		     (incf new-idx)))
+		 
+		 (setf (getf (car hunk) :old-end) (min old-idx (1- max-lines1))
+		       (getf (car hunk) :new-end) (min new-idx (1- max-lines2))
+		       (cdr hunk) (nreverse (cdr hunk)))
+		 (push hunk hunks)
+		 (setf hunk nil)))
+	  
+	  ;; if no current hunk, start a new one 
+	  (unless hunk
+	    (setf old-idx (max (- oidx context) 0)
+		  new-idx (max (- nidx context) 0)
+		  hunk (list (list :old-start old-idx :new-start new-idx)))
+	    ;; add before context lines
+	    (do ()
+		((>= old-idx oidx))
+	      (push (list 'null old-idx new-idx) (cdr hunk))
+	      (incf old-idx)
+	      (incf new-idx)))
+	  
+	  ;; check this edit is within context lines of the last line in the hunk
+	  (cond
+	    ((> oidx (+ old-idx context 1))
+	     ;; this edit is the start of a new hunk. complete the old one first
+	     (complete-hunk))
+	    (t
+	     ;; this edit continues the hunk, insert unchanged line commands
+	     (incf old-idx)
+	     (incf new-idx)
+	     (do ()
+		 ((>= old-idx oidx))
+	       (push (list 'null old-idx new-idx) (cdr hunk))
+	       (incf old-idx)
+	       (incf new-idx))
+	     ;; add this edit 
+	     (push edit (cdr hunk))
+	     (setf old-idx oidx
+		   new-idx nidx
+		   edits (cdr edits))
+	     (when (null edits)
+	       (complete-hunk)))))))))
+
+(defun diff (filespec1 filespec2 &key (context 3) encoding)
+  "Compute the difference between two files and print to *STANDARD-OUTPUT*.
+FILESPEC1 ::= original file.
+FILESPEC2 ::= new file.
+CONTEXT ::= number of unchanged context lines to print before/after changes. 
+ENCODING ::= file encoding.
+"
+  (let ((lines1 (get-file-lines filespec1 :encoding encoding))
+	(lines2 (get-file-lines filespec2 :encoding encoding)))
+    (let ((edit-script
+	   (coerce (diff% (map 'vector #'car lines1)
+			  (map 'vector #'car lines2)
+			  0
+			  0)
+		   'list)))
+      (format t "--- ~A~C~A~%" filespec1 #\tab (timestamp-string (file-write-date filespec1)))
+      (format t "+++ ~A~C~A~%" filespec2 #\tab (timestamp-string (file-write-date filespec2)))
+      (dolist (hunk (get-hunks edit-script context (length lines1) (length lines2)))
+	(destructuring-bind ((&key old-start new-start old-end new-end) &rest edits) hunk
+	  (check-type old-start integer)
+	  (check-type old-end integer)
+	  (check-type new-start integer)
+	  (check-type new-end integer)
+
+	  (format t "@@ -~A,~A +~A,~A @@~%"
+		  (1+ old-start)
+		  (let ((n (- old-end old-start)))
+		    (if (zerop n) 0 (1+ n)))
+		  (1+ new-start)
+		  (let ((n (- new-end new-start)))
+		    (if (zerop n) 0 (1+ n))))
+	  (dolist (edit edits)
+	    (destructuring-bind (cmd oldidx newidx) edit 
+	      (ecase cmd
+		(insert
+		 (format t "+~A~%" (second (aref lines2 newidx))))
+		(delete
+		 (format t "-~A~%" (second (aref lines1 oldidx))))
+		(null
+		 (format t " ~A~%" (second (aref lines1 oldidx)))))))))))
+  nil)
 
