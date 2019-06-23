@@ -331,88 +331,92 @@ START, END ::= region of file.
   "Pythons MOD always returns positive numbers." 
   (mod (+ a b) b))
 
-(defun diff% (lines1 lines2 i j)
+(defun diff% (lines1 lines2 index1 index2 test)
   "Good luck understanding how this works. I don't.
 LINES1 ::= array of old files lines.
 LINES2 ::= array of new file lines.
-I ::= index into old file
-J ::= index into new file.
+INDEX1, INDEX2 ::= index into old/new lines
+TEST ::= test functions 
 Returns an edit script ::= edit*
 EDIT ::= (INSERT old-index new-index), (DELETE old-index new-index)
 "
-  (let* ((n (length lines1))
-	 (m (length lines2))
-	 (l (+ n m))
-	 (z  (+ (* 2 (min n m)) 2)))
+  (let* ((nlines1 (length lines1))
+	 (nlines2 (length lines2))
+	 (sumlines (+ nlines1 nlines2))
+	 (minlines (+ (* 2 (min nlines1 nlines2)) 2)))
     (cond
-      ((and (> n 0) (> m 0))
-       (let ((w (- n m))
-	     (g (make-array z :initial-element 0))
-	     (p (make-array z :initial-element 0)))
-	 (dotimes (h (+ 1 (truncate l 2) (mod% l 2)))
+      ((and (> nlines1 0) (> nlines2 0))
+       (let ((w (- nlines1 nlines2))
+	     (g (make-array minlines :initial-element 0))
+	     (p (make-array minlines :initial-element 0)))
+	 (dotimes (h (+ 1 (truncate sumlines 2) (mod% sumlines 2)))
 	   (dotimes (r 2)
 	     (let ((c (if (zerop r) g p))
 		   (d (if (zerop r) p g))
 		   (o (if (zerop r) 1 0))
 		   (mm (if (zerop r) 1 -1)))
-	       (do ((k (- (- h (* 2 (max 0 (- h m))))) (+ k 2)))
-		   ((>= k (+ 1 h (* -2 (max 0 (- h n))))))
+	       (do ((k (- (- h (* 2 (max 0 (- h nlines2))))) (+ k 2)))
+		   ((>= k (+ 1 h (* -2 (max 0 (- h nlines1))))))
 		 (let* ((a (if (or (= k (- h))
 				   (and (not (= k h))
-					(< (aref c (mod% (1- k) z)) (aref c (mod% (1+ k) z)))))
-			       (aref c (mod% (1+ k) z))
-			       (1+ (aref c (mod% (1- k) z)))))
+					(< (aref c (mod% (1- k) minlines)) (aref c (mod% (1+ k) minlines)))))
+			       (aref c (mod% (1+ k) minlines))
+			       (1+ (aref c (mod% (1- k) minlines)))))
 			(b (- a k))
 			(s a)
 			(tt b))
 		   (do ()
-		       ((not (and (< a n)
-				  (< b m)
-				  (equal (aref lines1 (+ (* (- 1 o) n) (* mm a) (- o 1)))
-					 (aref lines2 (+ (* (- 1 o) m) (* mm b) (- o 1)))))))
+		       ((not (and (< a nlines1)
+				  (< b nlines2)
+				  (funcall test
+					   (aref lines1 (+ (* (- 1 o) nlines1) (* mm a) (- o 1)))
+					   (aref lines2 (+ (* (- 1 o) nlines2) (* mm b) (- o 1)))))))
 		     (incf a)
 		     (incf b))
-		   (setf (aref c (mod% k z)) a)
+		   (setf (aref c (mod% k minlines)) a)
 		   (let ((zz (- (- k w))))
-		     (when (and (= (mod% l 2) o)
+		     (when (and (= (mod% sumlines 2) o)
 				(>= zz (- (- h o)))
 				(<= zz (- h o))
-				(>= (+ (aref c (mod% k z)) (aref d (mod% zz z))) n))
+				(>= (+ (aref c (mod% k minlines)) (aref d (mod% zz minlines))) nlines1))
 		       (let ((dd (if (= o 1) (1- (* 2 h)) (* 2 h)))
-			     (x (if (= o 1) s (- n a)))
-			     (y (if (= o 1) tt (- m b)))
-			     (u (if (= o 1) a (- n s)))
-			     (v (if (= o 1) b (- m tt))))
+			     (x (if (= o 1) s (- nlines1 a)))
+			     (y (if (= o 1) tt (- nlines2 b)))
+			     (u (if (= o 1) a (- nlines1 s)))
+			     (v (if (= o 1) b (- nlines2 tt))))
 			 (cond
 			   ((or (> dd 1) (and (not (= x u)) (not (= y v))))
 			    (return-from diff%
-			      (concatenate 'vector
-					   (diff% (subseq% lines1 0 x)
-						  (subseq% lines2 0 y)
-						  i 
-						  j)
-					   (diff% (subseq% lines1 u n)
-						  (subseq% lines2 v m)
-						  (+ i u)
-						  (+ j v)))))
-			   ((> m n)
+			      (append (diff% (subseq% lines1 0 x)
+					     (subseq% lines2 0 y)
+					     index1
+					     index2
+					     test)
+				      (diff% (subseq% lines1 u nlines1)
+					     (subseq% lines2 v nlines2)
+					     (+ index1 u)
+					     (+ index2 v)
+					     test))))
+			   ((> nlines2 nlines1)
 			    (return-from diff%
 			      (diff% (vector)
-				     (subseq% lines2 n m)
-				     (+ i n)
-				     (+ j n))))
-			   ((< m n)
+				     (subseq% lines2 nlines1 nlines2)
+				     (+ index1 nlines1)
+				     (+ index2 nlines1)
+				     test)))
+			   ((< nlines2 nlines1)
 			    (return-from diff%
-			      (diff% (subseq% lines1 m n)
+			      (diff% (subseq% lines1 nlines2 nlines1)
 				     (vector)
-				     (+ i m)
-				     (+ j m))))
+				     (+ index1 nlines2)
+				     (+ index2 nlines2)
+				     test)))
 			   (t
-			    (return-from diff% (vector))))))))))))))
-      ((> n 0)
-       (apply #'vector (loop :for x :below n :collect (list 'delete (+ i x) j))))
+			    (return-from diff% (list))))))))))))))
+      ((> nlines1 0)
+       (loop :for x :below nlines1 :collect (list 'delete (+ index1 x) index2)))
       (t
-       (apply #'vector (loop :for x :below m :collect (list 'insert i (+ j x))))))))
+       (loop :for x :below nlines2 :collect (list 'insert index1 (+ index2 x)))))))
 
 (defun get-file-lines (filespec &key encoding)
   (let ((lines nil))
@@ -501,38 +505,34 @@ FILESPEC2 ::= new file.
 CONTEXT ::= number of unchanged context lines to print before/after changes. 
 ENCODING ::= file encoding.
 "
-  (let ((lines1 (get-file-lines filespec1 :encoding encoding))
-	(lines2 (get-file-lines filespec2 :encoding encoding)))
-    (let ((edit-script
-	   (coerce (diff% (map 'vector #'car lines1)
-			  (map 'vector #'car lines2)
-			  0
-			  0)
-		   'list)))
-      (format t "--- ~A~C~A~%" filespec1 #\tab (timestamp-string (file-write-date filespec1)))
-      (format t "+++ ~A~C~A~%" filespec2 #\tab (timestamp-string (file-write-date filespec2)))
-      (dolist (hunk (get-hunks edit-script context (length lines1) (length lines2)))
-	(destructuring-bind ((&key old-start new-start old-end new-end) &rest edits) hunk
-	  (check-type old-start integer)
-	  (check-type old-end integer)
-	  (check-type new-start integer)
-	  (check-type new-end integer)
-
-	  (format t "@@ -~A,~A +~A,~A @@~%"
-		  (1+ old-start)
-		  (let ((n (- old-end old-start)))
-		    (if (zerop n) 0 (1+ n)))
-		  (1+ new-start)
-		  (let ((n (- new-end new-start)))
-		    (if (zerop n) 0 (1+ n))))
-	  (dolist (edit edits)
-	    (destructuring-bind (cmd oldidx newidx) edit 
-	      (ecase cmd
-		(insert
-		 (format t "+~A~%" (second (aref lines2 newidx))))
-		(delete
-		 (format t "-~A~%" (second (aref lines1 oldidx))))
-		(null
-		 (format t " ~A~%" (second (aref lines1 oldidx)))))))))))
+  (let* ((lines1 (get-file-lines filespec1 :encoding encoding))
+	 (lines2 (get-file-lines filespec2 :encoding encoding))
+	 (hunks
+	  (get-hunks (diff% lines1 lines2 0 0
+			    (lambda (x y) (and (= (car x) (car y))
+					       (string= (cadr x) (cadr y)))))
+		     context
+		     (length lines1)
+		     (length lines2))))
+    (format t "--- ~A~C~A~%" filespec1 #\tab (timestamp-string (file-write-date filespec1)))
+    (format t "+++ ~A~C~A~%" filespec2 #\tab (timestamp-string (file-write-date filespec2)))
+    (dolist (hunk hunks)
+      (destructuring-bind ((&key (old-start 0) (new-start 0) (old-end 0) (new-end 0)) &rest edits) hunk
+	(format t "@@ -~A,~A +~A,~A @@~%"
+		(1+ old-start)
+		(let ((n (- old-end old-start)))
+		  (if (zerop n) 0 (1+ n)))
+		(1+ new-start)
+		(let ((n (- new-end new-start)))
+		  (if (zerop n) 0 (1+ n))))
+	(dolist (edit edits)
+	  (destructuring-bind (cmd oldidx newidx) edit 
+	    (ecase cmd
+	      (insert
+	       (format t "+~A~%" (second (aref lines2 newidx))))
+	      (delete
+	       (format t "-~A~%" (second (aref lines1 oldidx))))
+	      (null
+	       (format t " ~A~%" (second (aref lines1 oldidx))))))))))
   nil)
 
