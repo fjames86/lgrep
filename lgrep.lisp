@@ -414,6 +414,8 @@ EDIT ::= (INSERT old-index new-index), (DELETE old-index new-index)
 	       (push (list (sxhash line) line) lines))
 	     filespec
 	     :encoding encoding)
+    (when (string= (second (car lines)) "")
+      (setf lines (cdr lines)))
     (apply #'vector (nreverse lines))))
 
 
@@ -486,7 +488,7 @@ EDIT ::= (INSERT old-index new-index), (DELETE old-index new-index)
 		   edits (cdr edits))
 	     (when (null edits)
 	       (complete-hunk)))))))))
-
+  
 (defun diff (filespec1 filespec2 &key (context 3) encoding)
   "Compute the difference between two files and print to *STANDARD-OUTPUT*.
 FILESPEC1 ::= original file.
@@ -525,3 +527,56 @@ ENCODING ::= file encoding.
 	       (format t " ~A~%" (second (aref lines1 oldidx))))))))))
   nil)
 
+
+(defun get-diff-script (filespec1 filespec2 &key encoding)
+  (let ((lines1 (get-file-lines filespec1 :encoding encoding))
+	(lines2 (get-file-lines filespec2 :encoding encoding)))
+    (mapcar (lambda (cmd)
+	      (case (car cmd)
+		(insert
+		 (list :insert (third cmd) (second (aref lines2 (third cmd)))))
+		(delete
+		 (list :delete (second cmd)))))
+	    (diff% lines1 lines2 0 0
+		   (lambda (x y) (and (= (car x) (car y))
+				      (string= (cadr x) (cadr y))))))))
+
+(defun apply-diff-script (filespec script &key outfile (encoding :utf-8))
+  (let ((lines (get-file-lines filespec :encoding encoding))
+	(eol (babel:string-to-octets *default-eol*
+				     :encoding encoding
+				     :use-bom nil)))
+    (with-open-file (stream (or outfile filespec)
+			    :direction :output
+			    :if-exists :supersede
+			    :element-type '(unsigned-byte 8))
+      (do ((oldidx 0)
+	   (newidx 0)
+	   (cmds script))
+	  ((and (null cmds) (= oldidx (length lines))))
+	(let ((cmd (car cmds)))
+	  (cond
+	    ((and (eq (car cmd) :delete)
+		  (= (second cmd) oldidx))
+	     ;; delete this line - i.e. ignore and move into nexxt cmd
+	     (setf cmds (cdr cmds)
+		   oldidx (1+ oldidx)))
+	    ((and (eq (car cmd) :insert)
+		  (= (second cmd) newidx))
+	     ;; insert this line
+	     (write-sequence (babel:string-to-octets (third cmd)
+						     :encoding encoding
+						     :use-bom nil)
+			     stream)
+	     (write-sequence eol stream)
+	     (setf cmds (cdr cmds)
+		   newidx (1+ newidx)))
+	    (t ;; copy this line
+	     (write-sequence (babel:string-to-octets (second (aref lines oldidx))
+						     :encoding encoding
+						     :use-bom nil)
+			     stream)
+	     (write-sequence eol stream)
+	     (setf oldidx (1+ oldidx)
+		   newidx (1+ newidx))))))))
+  nil)
