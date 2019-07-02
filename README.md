@@ -10,7 +10,7 @@ This tool is noticably faster, although that is not a primary concern.
 
 ## 2. Usage
 
-## 2.1 `mapfile`
+## 2.1 `maplines` `mapfile`
 This function walks over a given file line by line, invoking a callback on each line.
 Lines are delimited by a given end of line sequence, which may be either a string or a sequence of
 unsigned bytes.

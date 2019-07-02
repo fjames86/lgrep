@@ -3,7 +3,8 @@
 
 (defpackage #:lgrep
   (:use #:cl)
-  (:export #:mapfile
+  (:export #:maplines
+	   #:mapfile
 	   #:mapgrep
 	   #:grep-if
 	   #:grep
@@ -61,6 +62,86 @@
      (setf encoding (or encoding :utf-8))))
   encoding)
 
+(defun maplines (func stream &key encoding eol binaryp)
+  "Map over each line of a given stream. No return value.
+FUNC ::= function taking two parameters, line lineindex.
+FILESPEC ::= file specification.
+EOL ::= end of line delimiter. defaults to #\return #\linefeed on windows, #\linefeed otherwise.
+ENCODING ::= character encoding. defaults to utf-8.
+BINARYP ::= don't decode as string, pass raw octets to func.
+"
+  (do ((buf (make-array (* 32 1024) :element-type '(unsigned-byte 8)))
+       (firstloop t)
+       (lineidx 0)
+       (start 0)
+       (end 0)
+       (eof nil)
+       (eol-bytes nil)
+       (file-offset 0)
+       (done nil))
+      (done)
+    
+    (flet ((refill-buffer ()
+	     (let ((n (read-sequence buf stream :start end)))
+	       (when (< n (length buf)) (setf eof t))
+	       (setf end n)))
+	   (get-eol-bytes ()
+	     (cond
+	       ((typep eol '(vector (unsigned-byte 8)))
+		eol)
+	       (t
+		(let ((default-eol 
+		       (babel:string-to-octets (or eol *default-eol*)
+					       :encoding encoding
+					       :use-bom nil)))
+		  (if (search default-eol buf)
+		      default-eol
+		      (babel:string-to-octets (format nil "~C" #\linefeed) :encoding :utf-8))))))
+	   (invoke-callback (pos)
+	     (if binaryp
+		 (funcall func (subseq buf start pos) lineidx)
+		 (let ((str (restart-case (babel:octets-to-string buf :start start :end pos :encoding (or encoding :utf-8))
+			      (use-iso-8859 () (babel:octets-to-string buf :start start :end pos :encoding :iso-8859-1))
+			      (use-value (value)
+				:report (lambda (stream) (format stream "Enter a value"))
+				:interactive
+				(lambda ()
+				  (format *query-io* "Enter a value: ")
+				  (finish-output *query-io*)
+				  (list (read-line *query-io*)))
+				value))))
+		   (funcall func str lineidx)))))
+      
+      ;; on first loop, check for BOM to detect encoding and derive eol bytes 
+      (when firstloop
+	  (refill-buffer)
+	  (setf encoding (guess-encoding buf encoding)
+		firstloop nil
+		eol-bytes (get-eol-bytes)))
+      
+      (let ((pos (search eol-bytes buf :start2 start :end2 end)))
+	(cond
+	  (pos
+	   ;; invoke callback 
+	   (invoke-callback pos)
+	   ;; update offsets 
+	   (setf file-offset (+ file-offset (- pos start) (length eol-bytes))
+		 start (+ pos (length eol-bytes))
+		 lineidx (1+ lineidx)))
+	  (eof
+	   ;; end of line not found and we have also hit the end of the file: we are done
+	   (invoke-callback end)
+	   (setf done t))
+	  (t 
+	   ;; eol not found but not end of file. memmove and refill buffer
+	   (when (= start 0) (error "Line larger than buffer"))
+	   
+	   (dotimes (i (- end start))
+	     (setf (aref buf i) (aref buf (+ start i))))
+	   (setf end (- end start)
+		 start 0)
+	   (refill-buffer)))))))
+
 (defun mapfile (func filespec &key encoding eol binaryp)
   "Map over each line of a given file. No return value.
 FUNC ::= function taking two parameters, line lineindex.
@@ -70,77 +151,10 @@ ENCODING ::= character encoding. defaults to utf-8.
 BINARYP ::= don't decode as string, pass raw octets to func.
 "
   (with-open-file (stream filespec :direction :input :element-type '(unsigned-byte 8))
-    (do ((buf (make-array (* 32 1024) :element-type '(unsigned-byte 8)))
-	 (firstloop t)
-	 (lineidx 0)
-	 (start 0)
-	 (end 0)
-	 (eof nil)
-	 (eol-bytes nil)
-	 (file-offset 0)
-	 (done nil))
-	(done)
-
-      (flet ((refill-buffer ()
-	       (let ((n (read-sequence buf stream :start end)))
-		 (when (< n (length buf)) (setf eof t))
-		 (setf end n)))
-	     (get-eol-bytes ()
-	       (cond
-		 ((typep eol '(vector (unsigned-byte 8)))
-		  eol)
-		 (t
-		  (let ((default-eol 
-			 (babel:string-to-octets (or eol *default-eol*)
-						 :encoding encoding
-						 :use-bom nil)))
-		    (if (search default-eol buf)
-			default-eol
-			(babel:string-to-octets (format nil "~C" #\linefeed) :encoding :utf-8))))))
-	     (invoke-callback (pos)
-	       (if binaryp
-		   (funcall func (subseq buf start pos) lineidx)
-		   (let ((str (restart-case (babel:octets-to-string buf :start start :end pos :encoding (or encoding :utf-8))
-				(use-iso-8859 () (babel:octets-to-string buf :start start :end pos :encoding :iso-8859-1))
-				(use-value (value)
-				  :report (lambda (stream) (format stream "Enter a value"))
-				  :interactive
-				  (lambda ()
-				    (format *query-io* "Enter a value: ")
-				    (finish-output *query-io*)
-				    (list (read-line *query-io*)))
-				  value))))
-		     (funcall func str lineidx)))))
-	
-	;; on first loop, check for BOM to detect encoding and derive eol bytes 
-	(when firstloop
-	  (refill-buffer)
-	  (setf encoding (guess-encoding buf encoding)
-		firstloop nil
-		eol-bytes (get-eol-bytes)))
-	
-	(let ((pos (search eol-bytes buf :start2 start :end2 end)))
-	  (cond
-	    (pos
-	     ;; invoke callback 
-	     (invoke-callback pos)
-	     ;; update offsets 
-	     (setf file-offset (+ file-offset (- pos start) (length eol-bytes))
-		   start (+ pos (length eol-bytes))
-		   lineidx (1+ lineidx)))
-	    (eof
-	     ;; end of line not found and we have also hit the end of the file: we are done
-	     (invoke-callback end)
-	     (setf done t))
-	    (t 
-	     ;; eol not found but not end of file. memmove and refill buffer
-	     (when (= start 0) (error "Line larger than buffer"))
-	     
-	     (dotimes (i (- end start))
-	       (setf (aref buf i) (aref buf (+ start i))))
-	     (setf end (- end start)
-		   start 0)
-	     (refill-buffer))))))))
+    (maplines func stream
+	      :encoding encoding
+	      :eol eol
+	      :binaryp binaryp)))
 
 (defun mapgrep (func predicate pathspec &key recursivep encoding eol exclude-files)
   "Map over each grepped line. 
@@ -489,12 +503,13 @@ EDIT ::= (INSERT old-index new-index), (DELETE old-index new-index)
 	     (when (null edits)
 	       (complete-hunk)))))))))
   
-(defun diff (filespec1 filespec2 &key (context 3) encoding)
+(defun diff (filespec1 filespec2 &key (context 3) encoding (stream *standard-output*))
   "Compute the difference between two files and print to *STANDARD-OUTPUT*.
 FILESPEC1 ::= original file.
 FILESPEC2 ::= new file.
 CONTEXT ::= number of unchanged context lines to print before/after changes. 
 ENCODING ::= file encoding.
+STREAM ::= output stream 
 "
   (let* ((lines1 (get-file-lines filespec1 :encoding encoding))
 	 (lines2 (get-file-lines filespec2 :encoding encoding))
@@ -505,11 +520,11 @@ ENCODING ::= file encoding.
 		     context
 		     (length lines1)
 		     (length lines2))))
-    (format t "--- ~A~C~A~%" filespec1 #\tab (timestamp-string (file-write-date filespec1)))
-    (format t "+++ ~A~C~A~%" filespec2 #\tab (timestamp-string (file-write-date filespec2)))
+    (format stream "--- ~A~C~A~%" filespec1 #\tab (timestamp-string (file-write-date filespec1)))
+    (format stream "+++ ~A~C~A~%" filespec2 #\tab (timestamp-string (file-write-date filespec2)))
     (dolist (hunk hunks)
       (destructuring-bind ((&key (old-start 0) (new-start 0) (old-end 0) (new-end 0)) &rest edits) hunk
-	(format t "@@ -~A,~A +~A,~A @@~%"
+	(format stream "@@ -~A,~A +~A,~A @@~%"
 		(1+ old-start)
 		(let ((n (- old-end old-start)))
 		  (if (zerop n) 0 (1+ n)))
@@ -520,15 +535,20 @@ ENCODING ::= file encoding.
 	  (destructuring-bind (cmd oldidx newidx) edit 
 	    (ecase cmd
 	      (insert
-	       (format t "+~A~%" (second (aref lines2 newidx))))
+	       (format stream "+~A~%" (second (aref lines2 newidx))))
 	      (delete
-	       (format t "-~A~%" (second (aref lines1 oldidx))))
+	       (format stream "-~A~%" (second (aref lines1 oldidx))))
 	      (null
-	       (format t " ~A~%" (second (aref lines1 oldidx))))))))))
+	       (format stream " ~A~%" (second (aref lines1 oldidx))))))))))
   nil)
 
 
 (defun get-diff-script (filespec1 filespec2 &key encoding)
+  "Generate a diff script that converts FILESPEC1 into FILESPEC2 
+FILESPEC1 ::= original file 
+FILESPEC2 ::= new file 
+ENCODING ::= character encoding 
+" 
   (let ((lines1 (get-file-lines filespec1 :encoding encoding))
 	(lines2 (get-file-lines filespec2 :encoding encoding)))
     (mapcar (lambda (cmd)
@@ -542,6 +562,12 @@ ENCODING ::= file encoding.
 				      (string= (cadr x) (cadr y))))))))
 
 (defun apply-diff-script (filespec script &key outfile (encoding :utf-8))
+  "Apply a diff script to an input file, generating an output file. 
+FILESPEC ::= input file 
+SCRIPT ::= diff script, as returned from GET-DIFF-SCRIPT 
+OUTFILE ::= output file, otherwise overwrites FILESPEC
+ENCODING ::= input/output character encoding 
+" 
   (let ((lines (get-file-lines filespec :encoding encoding))
 	(eol (babel:string-to-octets *default-eol*
 				     :encoding encoding
@@ -580,3 +606,4 @@ ENCODING ::= file encoding.
 	     (setf oldidx (1+ oldidx)
 		   newidx (1+ newidx))))))))
   nil)
+
